@@ -1,0 +1,9 @@
+node_modules/
+dist/
+test-results/
+.npm-cache/
+*.log
+.env
+.env.*
+*.pem
+*.key
