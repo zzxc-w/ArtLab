@@ -35,10 +35,8 @@ export function renderPreview(canvas:HTMLCanvasElement,study:Study,ramps:Ramp[],
   const ramp=(index:number)=>ramps[index]||ramps[0]||fallback;
   const shade=(r:Ramp,n:Vec3)=>sampleRamp(r,shadeValue(n,study.light),study.shading,study.shadowStyle);
 
-  ctx.fillStyle=fixed(lightTheme?'#F1F0EA':'#232A2D');ctx.fillRect(0,0,width,height);
-  const bg=ctx.createRadialGradient(width*.52,height*.38,0,width*.5,height*.5,Math.max(width,height)*.8);
-  bg.addColorStop(0,color(ramp(4).halftone));bg.addColorStop(1,color(ramp(4).shadow));
-  ctx.globalAlpha=lightTheme?.12:.23;ctx.fillStyle=bg;ctx.fillRect(0,0,width,height);ctx.globalAlpha=1;
+  // The backdrop is a paint swatch, so its displayed base must stay exact.
+  ctx.fillStyle=color(ramp(4).base);ctx.fillRect(0,0,width,height);
 
   // Color lookup is evaluated only 256 times per material; the pixel loop then
   // performs a dot product, retaining responsive iPad interaction.
@@ -59,7 +57,7 @@ export function renderPreview(canvas:HTMLCanvasElement,study:Study,ramps:Ramp[],
     for(let i=0;i<count;i++){
       const row=Math.floor(i/columns),remaining=Math.min(columns,count-row*columns),offset=(width-cellWidth*remaining)/2;
       const x=offset+cellWidth*(i%columns+.5),y=top+cellHeight*(row+.43),r=ramp(i);
-      ctx.globalAlpha=.12+.12*strength;ctx.fillStyle=fixed('#101920');ctx.beginPath();ctx.ellipse(x-key.x*strength*radius*.48,y+radius*1.16-key.y*strength*radius*.12,radius*.82,radius*.13,0,0,TAU);ctx.fill();ctx.globalAlpha=1;
+      ctx.globalAlpha=.24*strength;ctx.fillStyle=fixed('#101920');ctx.beginPath();ctx.ellipse(x-key.x*strength*radius*.48,y+radius*1.16-key.y*strength*radius*.12,radius*.82,radius*.13,0,0,TAU);ctx.fill();ctx.globalAlpha=1;
       const size=Math.min(380,Math.max(100,Math.round(radius*2*dpr))),cacheKey=JSON.stringify(['sphere',size,r,study.light,study.shading,study.shadowStyle,study.values]);
       let image=imageCache.get(cacheKey);
       if(!image){
