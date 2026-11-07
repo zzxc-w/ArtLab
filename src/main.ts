@@ -6,6 +6,7 @@ import {createDefaultStudy,defaultLight,lightingPresets,loadStudy,saveStudy,load
 import {extractImageColors} from './extract';
 import {exportPalettePNG,readPaletteFile} from './io';
 import {renderPreview} from './preview';
+import {preloadPortrait,portraitStatus} from './portrait';
 import {paletteStyles,shadowStyles,applyPaletteStyle,applyShadowStyle} from './styles';
 import {getLightVector,lightHandlePosition,screenToLightDirection} from './lighting';
 
@@ -57,7 +58,7 @@ q('#app').innerHTML=`
 <div class="section-title"><h3>Shadow & finish</h3><span>阴影风格</span></div><div id="shadow-style-list" class="shadow-style-grid"></div><p class="style-note">Keep the palette; change how light meets the drawing.</p><div class="section-divider"></div>
 ${range('temperature','Light temperature',-1,1,.01,'Cool|Warm')}${range('strength','Light strength',0,1,.01)}${range('shadow','Shadow depth',0,1,.01)}${range('hueShift','Shadow hue drift',-45,45,1)}${range('saturation','Color saturation',0,1.5,.01)}
 <details class="advanced-light" open><summary>Reflected light ${icon('chevron',13)}</summary>${range('bounce','Reflected light',0,1,.01)}<label class="ambient-row"><span>Surrounding color</span><span><input id="ambient" type="color" aria-label="Surrounding reflected color"/><output id="ambient-hex"></output></span></label></details>
-<div class="lighting-note">${icon('lock',15)}<p>Locks protect your <strong>base colors</strong> when generating, extracting, or choosing palette looks. Lighting still affects their ramps.</p></div></div><div class="panel-footer"><span>Find the color.<br/><strong>Then find its light.</strong></span><span>v2.1.0</span></div></aside></div>
+<div class="lighting-note">${icon('lock',15)}<p>Locks protect your <strong>base colors</strong> when generating, extracting, or choosing palette looks. Lighting still affects their ramps.</p></div></div><div class="panel-footer"><span>Find the color.<br/><strong>Then find its light.</strong></span><span>v2.2.0</span></div></aside></div>
 <dialog id="library-dialog"><div class="dialog-heading"><div><span class="eyebrow">YOUR COLOR COLLECTION</span><h2>Palette library</h2></div><button data-close="library-dialog" class="icon-button" aria-label="Close library">${icon('close')}</button></div><p class="muted">Colors, locks, and lighting, kept on this device.</p><div class="dialog-actions"><button id="library-save" class="primary">${icon('plus')}Save this study</button><button id="library-import" class="subtle-button">${icon('import')}Import palette</button></div><div id="library-list"></div></dialog>
 <dialog id="save-dialog"><form id="save-form"><div class="dialog-heading"><div><span class="eyebrow">KEEP A LITTLE INSPIRATION</span><h2>Save your palette</h2></div><button type="button" data-close="save-dialog" class="icon-button" aria-label="Close save palette">${icon('close')}</button></div><label class="field-label" for="save-name">Palette name</label><input id="save-name" required maxlength="40" autocomplete="off"/><p class="muted small">Includes every base color, lock, and the current lighting setup.</p><button class="primary wide" type="submit">Save to library</button></form></dialog>
 <dialog id="extract-dialog"><div class="dialog-heading"><div><span class="eyebrow">BORROW A LITTLE COLOR</span><h2>Colors from an image</h2></div><button data-close="extract-dialog" class="icon-button" aria-label="Close image extraction">${icon('close')}</button></div><p class="muted">Choose a local image. Everything stays in your browser.</p><label class="image-drop" for="image-file">${icon('image',30)}<strong>Choose a reference image</strong><span>PNG, JPEG, WebP · up to 20 MB</span><input id="image-file" type="file" accept="image/*"/></label><img id="extracted-preview" alt="Your reference image" hidden/><div id="extracted-colors" class="extracted-colors"></div><p id="extract-status" class="muted small" role="status">Extracted colors replace unlocked materials. Locked colors stay as they are.</p><button id="use-extracted" class="primary wide" disabled>Use these colors</button></dialog>
@@ -96,7 +97,7 @@ function updateLightGuide(){
  const dx=width/2-point.x,dy=height/2-point.y,length=Math.max(1,Math.hypot(dx,dy)),start=25,end=Math.min(77,length*.6);
  const ray=q('#light-ray');for(const [key,value] of Object.entries({x1:point.x+dx/length*start,y1:point.y+dy/length*start,x2:point.x+dx/length*end,y2:point.y+dy/length*end}))ray.setAttribute(key,String(value));ray.style.opacity=s.light.strength===0?'0':String(.3+s.light.strength*.5);
  const names=['Above','Upper right','Right','Lower right','Below','Lower left','Left','Upper left'],index=Math.round(((s.light.direction%360+360)%360)/45)%8;
- q('#light-description').textContent=s.light.strength===0?'Key off · flat base colors':`${names[index]} · front depth ${Math.round(s.light.elevation)}° · ${Math.round(s.light.strength*100)}% strength`;
+ q('#light-description').textContent=s.light.strength===0?(s.preview==='portrait'?'Key off · painted detail retained':'Key off · flat base colors'):`${names[index]} · front depth ${Math.round(s.light.elevation)}° · ${Math.round(s.light.strength*100)}% strength`;
  lightSource.setAttribute('aria-label',`Key light: ${names[index]}, angle ${Math.round(s.light.direction)} degrees, front depth ${Math.round(s.light.elevation)} degrees. Drag around the preview, or use arrow keys.`);
 }
 let lightDrag:{id:number;offsetX:number;offsetY:number}|null=null;
@@ -161,9 +162,23 @@ async function extract(file:File){const epoch=++extractEpoch;extracted=[];q<HTML
 q('#use-extracted').onclick=()=>{if(!extracted.length)return;if(s.colors.every(c=>c.locked)){toast('Unlock a material before applying extracted colors.');return;}act(()=>{let index=0;s.colors.forEach(c=>{if(!c.locked){c.hex=extracted[index%extracted.length];hsvCache.delete(c.id);index++;}});});q<HTMLDialogElement>('#extract-dialog').close();toast('Image colors applied to unlocked materials.');};
 function download(blob:Blob,name:string){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}
 const filename=()=>s.name.replace(/[^a-z0-9_-]+/gi,'-').replace(/^-|-$/g,'').slice(0,60)||'artlab-palette';
-document.querySelectorAll<HTMLButtonElement>('[data-export]').forEach(button=>button.onclick=async()=>{q<HTMLDetailsElement>('.export-menu').open=false;button.disabled=true;try{const name=filename(),ramps=s.colors.map(c=>buildRamp(c.hex,s.light));if(button.dataset.export==='json')download(new Blob([serializeStudy(s)],{type:'application/json'}),name+'.json');else if(button.dataset.export==='png')download(await exportPalettePNG(s,ramps),name+'-palette.png');else{const out=document.createElement('canvas');renderPreview(out,s,ramps,{width:1800,height:1800,export:true});const blob=await new Promise<Blob>((resolve,reject)=>out.toBlob(b=>b?resolve(b):reject(new Error('Could not create image.')),'image/png'));download(blob,name+'-illustration.png');}toast('Export ready.');}catch(error){toast(error instanceof Error?error.message:'Export failed.');}finally{button.disabled=false;}});
+document.querySelectorAll<HTMLButtonElement>('[data-export]').forEach(button=>button.onclick=async()=>{
+ q<HTMLDetailsElement>('.export-menu').open=false;button.disabled=true;
+ try{
+  const name=filename(),study=clone(),ramps=study.colors.map(c=>buildRamp(c.hex,study.light));
+  if(button.dataset.export==='json')download(new Blob([serializeStudy(study)],{type:'application/json'}),name+'.json');
+  else if(button.dataset.export==='png')download(await exportPalettePNG(study,ramps),name+'-palette.png');
+  else{
+   if(study.preview==='portrait'){await preloadPortrait();if(!portraitStatus().ready)throw new Error(portraitStatus().error||'The portrait is still loading. Try again in a moment.');}
+   const out=document.createElement('canvas');renderPreview(out,study,ramps,{width:1800,height:1800,export:true});
+   const blob=await new Promise<Blob>((resolve,reject)=>out.toBlob(b=>b?resolve(b):reject(new Error('Could not create image.')),'image/png'));download(blob,name+'-illustration.png');
+  }
+  toast('Export ready.');
+ }catch(error){toast(error instanceof Error?error.message:'Export failed.');}finally{button.disabled=false;}
+});
 q('#help-open').onclick=q('#offline-open').onclick=()=>q<HTMLDialogElement>('#help-dialog').showModal();
 if('serviceWorker' in navigator&&import.meta.env.PROD){navigator.serviceWorker.register('./sw.js').then(async reg=>{await navigator.serviceWorker.ready;q('#offline-status').textContent='App ready for offline use. All tools and local image extraction work without a connection.';q('#offline-open').textContent='App ready for offline use';if(reg.waiting)toast('An update is ready. Close and reopen ArtLab to use it.');}).catch(()=>{q('#offline-status').textContent='Offline cache unavailable. ArtLab still works online.';q('#offline-open').textContent='Offline help';});}
 window.addEventListener('pagehide',()=>{try{saveStudy(s);}catch{}});
-Object.assign(window,{artlabDiagnostics:()=>({study:clone(),ramps:s.colors.map(c=>buildRamp(c.hex,s.light)),lightVector:getLightVector(s.light),libraryCount:library.length,history:history.length,theme:document.documentElement.dataset.theme})});
+Object.assign(window,{artlabDiagnostics:()=>({study:clone(),ramps:s.colors.map(c=>buildRamp(c.hex,s.light)),lightVector:getLightVector(s.light),portrait:portraitStatus(),libraryCount:library.length,history:history.length,theme:document.documentElement.dataset.theme})});
 render();
+void preloadPortrait().then(()=>{scheduleDraw();if(portraitStatus().error)toast(portraitStatus().error!);});

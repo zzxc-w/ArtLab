@@ -13,14 +13,36 @@ try{
  // stable instead of letting Chrome switch GPU/CPU after several readbacks.
  await context.addInitScript(()=>{const getContext=HTMLCanvasElement.prototype.getContext;HTMLCanvasElement.prototype.getContext=function(kind,options){return getContext.call(this,kind,kind==='2d'&&this.id==='preview'?{...options,willReadFrequently:true}:options);};});
  const page=await context.newPage();
+ const portraitResponses=[];
+ page.on('response',response=>{if(/\/game-portrait(?:-[^/]+)?\.png$/.test(new URL(response.url()).pathname))portraitResponses.push({url:response.url(),status:response.status()});});
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
- await page.goto(url);await page.waitForFunction(()=>window.artlabDiagnostics);await page.waitForTimeout(300);
+ const waitForStudy=async()=>{await page.waitForFunction(()=>window.artlabDiagnostics);await page.waitForFunction(()=>{const portrait=window.artlabDiagnostics?.().portrait;return portrait?.ready||portrait?.error;});const portrait=await page.evaluate(()=>window.artlabDiagnostics().portrait);assert.ok(!portrait.error,`Portrait decoding failed: ${portrait.error}`);assert.equal(portrait.ready,true);await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));};
+ await page.goto(url);await waitForStudy();
  const state=()=>page.evaluate(()=>window.artlabDiagnostics());const art=()=>page.locator('#preview').screenshot();
- const settlePreview=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+ const settlePreview=async()=>{await page.waitForFunction(()=>window.artlabDiagnostics?.().portrait?.ready);await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));};
  const setLight=async(key,value)=>{await page.locator('#light-'+key).evaluate((input,value)=>{input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));},value);await settlePreview();};
  const rawArtHash=()=>page.locator('#preview').evaluate(async canvas=>{const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;const digest=await crypto.subtle.digest('SHA-256',pixels);return Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('');});
+ const saveArt=async name=>{const png=await page.locator('#preview').evaluate(canvas=>canvas.toDataURL());await writeFile(new URL(name,out),Buffer.from(png.split(',')[1],'base64'));};
  const restoreStudy=async study=>{await page.locator('#palette-file').setInputFiles({name:'restore-browser-study.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify({format:'artlab',version:2,study}))});await page.waitForFunction(expected=>{const actual=window.artlabDiagnostics().study;return Object.entries(expected).every(([key,value])=>key==='light'?Object.entries(value).every(([field,v])=>actual.light[field]===v):key==='colors'?value.length===actual.colors.length&&value.every((color,index)=>Object.entries(color).every(([field,v])=>actual.colors[index][field]===v)):actual[key]===value);},study);await settlePreview();};
  await check('standalone ArtLab starts with five editable materials and five-role ramps',async()=>{const a=await state();assert.equal(a.study.colors.length,5);assert.equal(a.ramps.length,5);assert.ok(a.ramps.every(r=>Object.keys(r).length===5));await page.screenshot({path:new URL('desktop.png',out).pathname.replace(/^\/([A-Z]:)/,'$1')});});
+ await check('the detailed game-anime portrait is bundled and fully decoded before rendering',async()=>{
+  const bytes=await readFile(new URL('../src/assets/game-portrait.png',import.meta.url));assert.equal(bytes.toString('hex',0,8),'89504e470d0a1a0a');assert.ok(bytes.readUInt32BE(16)>=768&&bytes.readUInt32BE(20)>=1024,'Source artwork retains portrait-scale detail');
+  const portrait=(await state()).portrait;assert.equal(portrait.ready,true);assert.ok(!portrait.error);assert.ok(portraitResponses.some(response=>response.status===200),'The local bundled portrait asset loaded successfully');await saveArt('game-portrait-default.png');
+ });
+ await check('skin hair cloth and accent edits each visibly recolor the detailed portrait',async()=>{
+  const before=(await state()).study,edits=['#65B7D8','#D8AE65','#D865A6','#63D8AC'];
+  try{
+   await page.locator('[data-preview="portrait"]').click();await settlePreview();
+   for(let index=0;index<4;index++){
+    await restoreStudy({...before,preview:'portrait'});const color=before.colors[index];await page.locator(`#color-list [data-select="${color.id}"]`).click();await settlePreview();
+    const previous=await rawArtHash();await page.locator('#preview').evaluate(canvas=>{window.artlabMaterialPixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;});
+    await page.locator('#hex').fill(edits[index]);await page.locator('#hex').press('Tab');await settlePreview();assert.notEqual(await rawArtHash(),previous,`${color.name} changes the portrait itself`);
+    const changedPixels=await page.locator('#preview').evaluate(canvas=>{const current=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data,previous=window.artlabMaterialPixels;let changed=0;for(let i=0;i<current.length;i+=4)if(Math.max(Math.abs(current[i]-previous[i]),Math.abs(current[i+1]-previous[i+1]),Math.abs(current[i+2]-previous[i+2]))>8)changed++;return changed;});assert.ok(changedPixels>=40,`${color.name} visibly affects a material region (${changedPixels} pixels)`);
+    const after=(await state()).study;assert.equal(after.colors[index].hex,edits[index]);for(let other=0;other<before.colors.length;other++)if(other!==index)assert.deepEqual(after.colors[other],before.colors[other],'Other base materials remain intact');
+   }
+   await restoreStudy(before);await setLight('strength',1);await setLight('direction',-55);await saveArt('game-cel-left.png');await setLight('direction',55);await saveArt('game-cel-right.png');await page.locator('[data-shadow-style="soft"]').click();await settlePreview();await saveArt('game-painted.png');
+  }finally{await restoreStudy(before);}
+ });
  await check('HEX RGB HSV and saturation/value gestures update the same color',async()=>{
   await page.locator('#hex').fill('#336699');await page.locator('#hex').press('Tab');assert.equal((await state()).study.colors[0].hex,'#336699');assert.equal(await page.locator('#rgb-r').inputValue(),'51');
   await page.locator('#rgb-r').fill('150');await page.locator('#rgb-r').press('Tab');assert.equal((await state()).study.colors[0].hex,'#966699');
@@ -54,7 +76,7 @@ try{
    for(const id of ['anime','soft','graphic','luminous']){
     await page.locator(`[data-shadow-style="${id}"]`).click();const applied=await state();assert.deepEqual(applied.study.colors,before.colors);assert.equal(applied.study.shadowStyle,id);assert.equal(applied.study.shading,expectedShading[id]);ramps.add(JSON.stringify(applied.ramps));
     for(const field of ['temperature','direction','elevation'])assert.equal(applied.study.light[field],before.light[field],`${id} preserves ${field}`);
-    await page.waitForFunction(id=>JSON.parse(localStorage.getItem('artlab.study.v2')||'null')?.shadowStyle===id,id);await page.reload();await page.waitForFunction(()=>window.artlabDiagnostics);
+    await page.waitForFunction(id=>JSON.parse(localStorage.getItem('artlab.study.v2')||'null')?.shadowStyle===id,id);await page.reload();await waitForStudy();
     const restored=(await state()).study;assert.equal(restored.shadowStyle,id);assert.equal(restored.shading,expectedShading[id]);assert.deepEqual(restored.colors,before.colors);assert.deepEqual(restored.light,applied.study.light);
    }
    assert.equal(ramps.size,4,'Each finish produces its own lighting ramp');
@@ -79,11 +101,11 @@ try{
   }finally{await restoreStudy(before);}
  });
  await check('cel smooth portrait and materials previews all render distinct artwork and values mode is grayscale',async()=>{
-  const cel=hash(await art());await page.locator('[data-shading="smooth"]').click();await page.waitForTimeout(80);assert.notEqual(hash(await art()),cel);await page.locator('[data-preview="spheres"]').click();await page.waitForTimeout(80);const spheres=hash(await art());assert.notEqual(spheres,cel);await page.locator('#values').check();
+  const cel=hash(await art());await page.locator('[data-shading="smooth"]').click();await settlePreview();assert.notEqual(hash(await art()),cel);await page.locator('[data-preview="spheres"]').click();await settlePreview();const spheres=hash(await art());assert.notEqual(spheres,cel);await page.locator('#values').check();await settlePreview();
   const gray=await page.locator('#preview').evaluate(canvas=>{const p=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;let colored=0;for(let i=0;i<p.length;i+=4)if(Math.max(p[i],p[i+1],p[i+2])-Math.min(p[i],p[i+1],p[i+2])>1)colored++;return colored;});assert.equal(gray,0);await page.locator('#values').uncheck();await page.locator('[data-preview="portrait"]').click();await page.locator('[data-shading="cel"]').click();
  });
  await check('library saves and reloads complete studies and survives browser reload',async()=>{
-  await page.locator('#save-open').click();await page.locator('#save-name').fill('Anime dusk');await page.locator('#save-form button[type=submit]').click();assert.equal((await state()).libraryCount,1);await page.reload();await page.waitForFunction(()=>window.artlabDiagnostics);assert.equal((await state()).study.name,'Anime dusk');await page.locator('#library-open').click();await page.getByRole('button',{name:'Load',exact:true}).click();assert.equal((await state()).study.name,'Anime dusk');
+  await page.locator('#save-open').click();await page.locator('#save-name').fill('Anime dusk');await page.locator('#save-form button[type=submit]').click();assert.equal((await state()).libraryCount,1);await page.reload();await waitForStudy();assert.equal((await state()).study.name,'Anime dusk');await page.locator('#library-open').click();await page.getByRole('button',{name:'Load',exact:true}).click();assert.equal((await state()).study.name,'Anime dusk');
  });
  let palettePNG;
  await check('palette PNG JSON and illustration exports download valid portable files',async()=>{
@@ -118,13 +140,15 @@ try{
   const before=(await state()).study.colors;await page.locator('#extract-open').click();await page.locator('#image-file').setInputFiles({name:'reference.png',mimeType:'image/png',buffer:Buffer.from(image.split(',')[1],'base64')});await page.locator('#use-extracted').waitFor({state:'visible'});await page.waitForFunction(()=>!document.querySelector('#use-extracted').disabled);await page.locator('#use-extracted').click();const after=(await state()).study.colors;assert.equal(after[1].hex,before[1].hex);assert.notEqual(after[0].hex,before[0].hex);
  });
  await check('dark light and device themes remain usable and remembered',async()=>{
-  await page.locator('#theme').selectOption('light');await page.screenshot({path:new URL('light.png',out).pathname.replace(/^\/([A-Z]:)/,'$1')});assert.equal((await state()).theme,'light');await page.reload();await page.waitForFunction(()=>window.artlabDiagnostics);assert.equal((await state()).theme,'light');await page.locator('#theme').selectOption('system');await page.emulateMedia({colorScheme:'dark'});await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');assert.equal((await state()).theme,'dark');
+  await page.locator('#theme').selectOption('light');await page.screenshot({path:new URL('light.png',out).pathname.replace(/^\/([A-Z]:)/,'$1')});assert.equal((await state()).theme,'light');await page.reload();await waitForStudy();assert.equal((await state()).theme,'light');await page.locator('#theme').selectOption('system');await page.emulateMedia({colorScheme:'dark'});await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');assert.equal((await state()).theme,'dark');
  });
  await check('tablet portrait and phone drawers respect safe areas and fit without horizontal overflow',async()=>{
   for(const viewport of [{width:1180,height:820},{width:820,height:1180},{width:390,height:844}]){await page.setViewportSize(viewport);await page.waitForTimeout(70);if(viewport.width<=1050){await page.locator('#colors-open').click();assert.ok(await page.locator('#hex').isVisible());await page.locator('#colors-panel [data-close-panel]').click();await page.locator('#lighting-open').click();assert.ok(await page.locator('#light-temperature').isVisible());await page.locator('#lighting-panel [data-close-panel]').click();}assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:new URL(`layout-${viewport.width}.png`,out).pathname.replace(/^\/([A-Z]:)/,'$1')});}
  });
  await check('offline service worker caches only ArtLab and supports a disconnected reload',async()=>{
-  await page.waitForFunction(()=>navigator.serviceWorker.controller);await page.waitForFunction(()=>document.querySelector('#offline-status').textContent.includes('ready'));await context.setOffline(true);await page.reload();await page.waitForFunction(()=>window.artlabDiagnostics);assert.ok((await state()).study.colors.length);const keys=await page.evaluate(()=>caches.keys());assert.ok(keys.some(k=>k.startsWith('artlab:')));assert.ok(keys.every(k=>k.startsWith('artlab:')));await context.setOffline(false);
+  await page.waitForFunction(()=>navigator.serviceWorker.controller);await page.waitForFunction(()=>document.querySelector('#offline-status').textContent.includes('ready'));
+  const portraitURL=portraitResponses.find(response=>response.status===200)?.url;assert.ok(portraitURL);assert.ok(await page.evaluate(async portraitURL=>{for(const key of await caches.keys())if(key.startsWith('artlab:')&&await(await caches.open(key)).match(portraitURL))return true;return false;},portraitURL),'The detailed portrait asset is included in the offline cache');
+  await context.setOffline(true);await page.reload();await waitForStudy();assert.ok((await state()).study.colors.length);assert.equal((await state()).portrait.ready,true);const keys=await page.evaluate(()=>caches.keys());assert.ok(keys.some(k=>k.startsWith('artlab:')));assert.ok(keys.every(k=>k.startsWith('artlab:')));await context.setOffline(false);
  });
  assert.deepEqual(errors,[]);checks.push('no JavaScript or asset errors');await writeFile(new URL('browser-report.json',out),JSON.stringify({url,checks,errors},null,2));console.log(`PASS ${checks.length} browser checks`);
 }finally{await browser.close();}
