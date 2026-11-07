@@ -1,6 +1,6 @@
 import type { LightSettings, SavedPalette, Study, Swatch } from './types';
 
-export const defaultLight:LightSettings={temperature:.25,strength:.5,shadow:.55,hueShift:8,saturation:1,bounce:.25,ambient:'#7895B8',direction:-35};
+export const defaultLight:LightSettings={temperature:.25,strength:.5,shadow:.55,hueShift:8,saturation:1,bounce:.25,ambient:'#7895B8',direction:-35,elevation:45};
 export const lightingPresets=[
   {id:'studio',name:'Soft studio',description:'Quiet neutral light. A clear place to begin.',light:{...defaultLight,temperature:.05,strength:.35,shadow:.48,hueShift:4,bounce:.18}},
   {id:'sunlight',name:'Sunlight',description:'Warm key light with a cool sky fill.',light:{...defaultLight,temperature:.48,strength:.62,shadow:.58,hueShift:10,bounce:.3,ambient:'#8AAED2',direction:-40}},
@@ -16,26 +16,28 @@ export function createDefaultStudy():Study {
     {id:'cloth',name:'Cloth',hex:'#6E9A9F',locked:false},
     {id:'accent',name:'Accent',hex:'#DCAC62',locked:false},
     {id:'backdrop',name:'Backdrop',hex:'#394957',locked:false}
-  ],selected:'skin',light:{...defaultLight},shading:'cel',preview:'portrait',values:false,theme:'system'};
+  ],selected:'skin',light:{...defaultLight},shading:'cel',shadowStyle:'anime',preview:'portrait',values:false,theme:'system'};
 }
 const studyKey='artlab.study.v2',libraryKey='artlab.library.v2';
-const ranges:Record<Exclude<keyof LightSettings,'ambient'>,[number,number]>={temperature:[-1,1],strength:[0,1],shadow:[0,1],hueShift:[-45,45],saturation:[0,1.5],bounce:[0,1],direction:[-180,180]};
+const ranges:Record<Exclude<keyof LightSettings,'ambient'>,[number,number]>={temperature:[-1,1],strength:[0,1],shadow:[0,1],hueShift:[-45,45],saturation:[0,1.5],bounce:[0,1],direction:[-180,180],elevation:[10,80]};
 const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const validId=(v:unknown):v is string=>typeof v==='string'&&/^[a-z0-9_-]{1,64}$/i.test(v);
 const validName=(v:unknown):v is string=>typeof v==='string'&&v.trim().length>0&&v.length<=40&&!/[\u0000-\u001f\u007f]/.test(v);
 const hex=(v:unknown):string|null=>typeof v==='string'&&/^#[0-9a-f]{6}$/i.test(v)?v.toUpperCase():null;
 function validLight(v:unknown):v is LightSettings {
-  return object(v)&&!!hex(v.ambient)&&Object.entries(ranges).every(([key,[min,max]])=>typeof v[key]==='number'&&Number.isFinite(v[key])&&(v[key] as number)>=min&&(v[key] as number)<=max);
+  // Version 2 files written before directional depth was introduced remain valid.
+  return object(v)&&!!hex(v.ambient)&&Object.entries(ranges).every(([key,[min,max]])=>key==='elevation'&&!Object.hasOwn(v,key)||typeof v[key]==='number'&&Number.isFinite(v[key])&&(v[key] as number)>=min&&(v[key] as number)<=max);
 }
 function validStudy(v:unknown):v is Study {
   if(!object(v)||!validName(v.name)||!Array.isArray(v.colors)||v.colors.length<1||v.colors.length>8||!validLight(v.light))return false;
   if(!['cel','smooth'].includes(String(v.shading))||!['portrait','spheres'].includes(String(v.preview))||!['system','light','dark'].includes(String(v.theme))||typeof v.values!=='boolean')return false;
+  if(Object.hasOwn(v,'shadowStyle')&&!['anime','soft','graphic','luminous'].includes(String(v.shadowStyle)))return false;
   const ids=new Set<string>();
   for(const color of v.colors){if(!object(color)||!validId(color.id)||ids.has(color.id)||!validName(color.name)||!hex(color.hex)||typeof color.locked!=='boolean')return false;ids.add(color.id);}
   return typeof v.selected==='string'&&ids.has(v.selected);
 }
 function sanitizeStudy(v:Study):Study {
-  return {name:v.name.trim(),colors:v.colors.map(c=>({id:c.id,name:c.name.trim(),hex:hex(c.hex)!,locked:c.locked})),selected:v.selected,light:{...Object.fromEntries(Object.keys(ranges).map(k=>[k,v.light[k as keyof LightSettings]])),ambient:hex(v.light.ambient)!} as LightSettings,shading:v.shading,preview:v.preview,values:v.values,theme:v.theme};
+  return {name:v.name.trim(),colors:v.colors.map(c=>({id:c.id,name:c.name.trim(),hex:hex(c.hex)!,locked:c.locked})),selected:v.selected,light:{...Object.fromEntries(Object.keys(ranges).map(k=>[k,k==='elevation'&&!Object.hasOwn(v.light,k)?defaultLight.elevation:v.light[k as keyof LightSettings]])),ambient:hex(v.light.ambient)!} as LightSettings,shading:v.shading,shadowStyle:v.shadowStyle??(v.shading==='smooth'?'soft':'anime'),preview:v.preview,values:v.values,theme:v.theme};
 }
 /** Repair local preferences field by field; strict file imports use parseStudyJSON. */
 export function validateStudy(value:unknown):Study {
@@ -57,6 +59,8 @@ export function validateStudy(value:unknown):Study {
     if(hex(value.light.ambient))result.light.ambient=hex(value.light.ambient)!;
   }
   if(value.shading==='cel'||value.shading==='smooth')result.shading=value.shading;
+  result.shadowStyle=result.shading==='smooth'?'soft':'anime';
+  if(['anime','soft','graphic','luminous'].includes(String(value.shadowStyle)))result.shadowStyle=value.shadowStyle as Study['shadowStyle'];
   if(value.preview==='portrait'||value.preview==='spheres')result.preview=value.preview;
   if(value.theme==='system'||value.theme==='light'||value.theme==='dark')result.theme=value.theme;
   if(typeof value.values==='boolean')result.values=value.values;

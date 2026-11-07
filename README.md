@@ -8,8 +8,11 @@ A standalone color and lighting studio for illustrators, companion to [FoldLight
 
 - Edit up to eight named base colors with the saturation/value field, hue slider, native picker, or exact HSV, HEX, and RGB values. The saturation/value field also accepts arrow keys, with Shift for larger steps.
 - Each base color generates Highlight, Halftone, Base, Shadow, and Reflected light. Tap any color to copy its HEX. The base anchor remains unchanged by lighting controls.
-- Start from Soft studio, Sunlight, Moonlight, Sunset, or Overcast, then adjust temperature, strength, shadow depth, shadow hue drift, saturation, reflected color, bounce, and direction.
-- Compare cel and smooth artwork. Portrait assigns the first five materials to skin, hair, cloth, accent, and backdrop; Materials shows all colors as spheres. Values removes hue for a luminance study. These are artistic plane/color studies, not physical material or spectral simulations.
+- Drag the visible gold key light around the preview to change its screen angle. **Front depth** tilts it from side lighting toward the viewer. Face, hair, neck, clothing, and spheres share that source direction, with local bangs, nose, and chin cast shadows. Arrow keys on the focused light adjust angle/depth; Home resets its position. Zero light strength removes directional effects and shows the base materials.
+- Start from Soft studio, Sunlight, Moonlight, Sunset, or Overcast, then adjust temperature, strength, shadow depth, shadow hue drift, saturation, reflected color, bounce, angle, and front depth.
+- Open **Palette looks** above the preview for eight color stories: Clear anime / 日系赛璐璐, Soft pastel / 柔和粉彩, Coastal light / 清透海盐, Warm nostalgic / 暖调复古, Muted illustration / 低饱和插画, Vivid pop / 高彩撞色, Night neon / 霓虹夜色, and Earthy paint / 自然厚涂. These apply only to unlocked base colors and keep the current light and finish.
+- **Shadow & finish** offers Anime cel / 赛璐璐, Soft painted / 半厚涂, Graphic contrast / 平面插画, and Luminous color / 清透光感. They adjust the shading and lighting-ramp treatment while preserving every base color and source position. Palette and finish presets can be combined independently.
+- Compare cel and softly painted artwork on an original Japanese-anime-inspired portrait. Portrait assigns the first five materials to skin, hair, cloth, accent, and backdrop; Materials shows all colors as spheres. Values removes hue for a luminance study. These are analytic form/color studies, not physical material or spectral simulations.
 - Generate analogous, complementary, split complementary, triadic, or monochromatic harmonies around the selected anchor. Locks preserve base colors during harmony generation and image extraction. Locked base colors can still be edited manually, and their lighting ramps still respond to the light.
 - Extract dominant colors from a local PNG, JPEG, WebP, or other browser-decodable raster image. Transparent pixels are ignored. Extraction replaces only unlocked materials. SVG is intentionally rejected. Images stay in this browser and are not uploaded.
 - Undo/redo study edits with the visible buttons, or Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z when not typing in an input.
@@ -55,7 +58,7 @@ Updates download in the background and activate after all ArtLab tabs/Home Scree
 
 ## Validation
 
-**18 logic/data tests and 15 production browser checks passed on Windows Chrome.** Tests cover sRGB/HSV/HEX conversions, the sRGB transfer curve, known D65 Oklab values and gamut mapping, lighting ramp bounds/value order, locking, deterministic image extraction, import validation, storage errors, editable PNG/JSON round-trips and CRC checking. Browser checks exercise color editing, gestures, harmonies, presets, previews/values, library persistence, real downloads and image extraction, themes, responsive layouts, offline reload, whitespace names, and import races.
+**31 logic/data tests and 18 production browser checks passed on Windows Chrome.** Tests cover sRGB/HSV/HEX conversions, the sRGB transfer curve, known D65 Oklab values and gamut mapping, lighting ramp bounds/value order, locking, deterministic image extraction, import validation, storage errors, editable PNG/JSON round-trips and CRC checking, source-vector geometry, shadow finishes, palette looks, and migration of older saved files. Browser checks exercise color editing, gestures, harmonies, all palette/finish presets, source dragging/keyboard/depth, zero-key pixel invariance, previews/values, library persistence, real downloads and image extraction, themes, responsive layouts, offline reload, whitespace names, and import races.
 
 ```sh
 npm run build
@@ -65,7 +68,9 @@ TEST_URL=http://127.0.0.1:4180/ npm run test:browser
 
 For PowerShell set `$env:TEST_URL='http://127.0.0.1:4180/'` before the browser command. Browser tests use installed Chrome and a fresh context. Reports, screenshots, and exports go to ignored `test-results/`.
 
-Actual iPad Safari, Pencil, Home Screen installation, and Safari's download/share flows remain manual checks. Color output is sRGB, without ICC profile management, HDR, CMYK, alpha editing, cloud sync, or source-image editing. Image extraction is a dominant-color approximation; it does not infer semantic skin/hair/material regions. Portrait lighting is a stylized vector study, while sphere shading gives a simpler shape reference.
+Actual iPad Safari, Pencil, Home Screen installation, and Safari's download/share flows remain manual checks. Color output is sRGB, without ICC profile management, HDR, CMYK, alpha editing, cloud sync, or source-image editing. Image extraction is a dominant-color approximation; it does not infer semantic skin/hair/material regions. Portrait lighting uses analytic normal fields and localized cast shapes on vector artwork. It is a stylized lighting reference rather than a 3D ray-traced character or brush simulation.
+
+v2.1.0 adds the visible light, anime redraw, palette looks, and shadow finishes. Existing version-2 JSON, ArtLab PNGs, saved studies, and libraries migrate missing new fields automatically. The file format version and local-storage keys remain compatible.
 
 The color engine uses the standard sRGB transfer curve and [Ottosson's D65 Oklab matrices](https://bottosson.github.io/posts/oklab/). Lighting blends in linear light and uses perceptual adjustments with chroma reduction for sRGB gamut mapping. Its ramp model is deliberately tuned for illustration rather than photometric prediction.
 
@@ -74,11 +79,14 @@ The color engine uses the standard sRGB transfer curve and [Ottosson's D65 Oklab
 ```text
 src/main.ts       UI, accessible controls, undo/redo, import sequencing
 src/color.ts      Pure color conversions, harmonies, and lighting ramps
-src/preview.ts    Local Canvas2D cel/smooth portrait and sphere studies
+src/preview.ts    Anime cel/painted portrait, analytic forms, local cast shadows
+src/lighting.ts   Shared source vector, normal response, and ramp sampling
+src/styles.ts     Independent palette looks and shadow-finish presets
 src/library.ts    Versioned validation and independent local persistence
 src/extract.ts    Bounded image decoding and perceptual color extraction
 src/io.ts         Palette PNG metadata and local import/export
 src/style.css     FoldLight-inspired themes, panels, responsive safe areas
+src/styles-ui.css Source guide and palette/finish preset controls
 vite.config.ts   Relative build and generated, scope-isolated service worker
 scripts/icons.mjs Deterministic vector and opaque PWA icon generation
 ```
