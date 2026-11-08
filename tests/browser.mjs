@@ -139,6 +139,57 @@ try{
    for(const direction of [-90,90]){await setLight('direction',direction);const hairCasts=await page.evaluate(points=>points.map(point=>({name:point.name,...window.artlabPortraitLightProbe(point.u,point.v)})),materialLandmarks.filter(point=>point.material===1));for(const point of hairCasts)assert.equal(point.occlusion,0,`${point.name} receives its form shading without a contradictory terrain self-shadow`);}
   }finally{await restoreStudy(before);}
  });
+ await check('collar ownership and chest shoulder and sleeve shading stay coherent across thirty lighting views',async()=>{
+  const before=(await state()).study,colors=['#FFDAC4','#A58FD1','#EBEBEB','#AFAFAF','#949CEA'];
+  const analyzeBody=()=>page.locator('#preview').evaluate(canvas=>{
+   const context=canvas.getContext('2d'),image=context.getImageData(0,0,canvas.width,canvas.height),bounds=canvas.getBoundingClientRect(),grid=[],owners={},body={},width=66,height=31;
+   const pixel=(u,v)=>{const probe=window.artlabPortraitProbe(u,v),x=Math.round(probe.x*canvas.width/bounds.width),y=Math.round(probe.y*canvas.height/bounds.height);if(x<0||y<0||x>=canvas.width||y>=canvas.height)return null;const offset=(y*canvas.width+x)*4,r=image.data[offset],g=image.data[offset+1],b=image.data[offset+2];return r*.2126+g*.7152+b*.0722;};
+   // This is the visible outer collar, independently located in the flat
+   // drawing. A former head ellipse incorrectly claimed most of its pixels.
+   for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+    const u=.56+x*.002,v=.34+y*.002,probe=window.artlabPortraitProbe(u,v);
+    if(probe.alpha<.99||probe.ink>.02||probe.material!==2){grid.push(null);continue;}
+    owners[probe.surface]=(owners[probe.surface]||0)+1;const light=window.artlabPortraitLightProbe(u,v);grid.push({dot:light.normalDot,cast:light.occlusion,luma:pixel(u,v)});
+   }
+   const saddles={dot:0,cast:0},islands={dot:0,cast:0,luma:0},thresholds={dot:.25,cast:.25,luma:25};
+   for(let y=1;y<height-1;y++)for(let x=1;x<width-1;x++){
+    const index=y*width+x,a=grid[index],b=grid[index+1],c=grid[index+width],d=grid[index+width+1];
+    if(a&&b&&c&&d)for(const key of ['dot','cast'])if(Math.min(a[key],d[key])>Math.max(b[key],c[key])+thresholds[key]||Math.min(b[key],c[key])>Math.max(a[key],d[key])+thresholds[key])saddles[key]++;
+    const neighbors=[grid[index-1],grid[index+1],grid[index-width],grid[index+width]];
+    if(a&&neighbors.every(Boolean))for(const key of ['dot','cast','luma'])if(neighbors.every(value=>value[key]>a[key]+thresholds[key])||neighbors.every(value=>value[key]<a[key]-thresholds[key]))islands[key]++;
+   }
+   // Sample broad, line-free parts of the actual inner garment, shoulder
+   // armor and sleeve; source-facing body volume must extend beyond the hair.
+   for(const row of [{name:'chest',u0:.27,u1:.43,v:.56,material:4},{name:'shoulder',u0:.65,u1:.82,v:.46,material:5},{name:'sleeve',u0:.75,u1:.88,v:.65,material:2}]){
+    const samples=[];
+    for(let u=row.u0;u<=row.u1;u+=.003){
+     const probe=window.artlabPortraitProbe(u,row.v);if(probe.alpha<.99||probe.ink>0||probe.material!==row.material||probe.surface!==2)continue;
+     let clean=true;for(const du of [-.002,0,.002])for(const dv of [-.002,0,.002]){const neighbor=window.artlabPortraitProbe(u+du,row.v+dv);if(neighbor.material!==row.material||neighbor.ink>.04||neighbor.alpha<.99)clean=false;}
+     if(!clean)continue;const light=window.artlabPortraitLightProbe(u,row.v);if(light.occlusion>.05)continue;const luma=pixel(u,row.v);if(luma!==null)samples.push({dot:light.normalDot,luma});
+    }
+    body[row.name]={count:samples.length,levels:new Set(samples.map(sample=>Math.round(sample.luma))).size,dotRange:samples.length?Math.max(...samples.map(sample=>sample.dot))-Math.min(...samples.map(sample=>sample.dot)):0};
+   }
+   return {owners,saddles,islands,body};
+  });
+  const assertCoherent=(result,label)=>{
+   assert.ok(result.owners[2]>1000,`${label} samples the actual collar interior`);assert.deepEqual(Object.keys(result.owners),['2'],`${label} never deforms cloth as a head or hair surface`);
+   for(const metric of ['dot','cast']){assert.equal(result.saddles[metric],0,`${label} has no alternating ${metric} checkerboard`);assert.equal(result.islands[metric],0,`${label} has no isolated ${metric} holes`);}
+   assert.ok(result.islands.luma<=1,`${label} has no repeated isolated light/dark pixels in clean collar paint`);
+  };
+  try{
+   const study={...before,preview:'portrait',values:false,shading:'cel',shadowStyle:'anime',colors:before.colors.map((color,index)=>({...color,hex:colors[index]||color.hex})),light:{...before.light,strength:1,direction:4,elevation:33}};
+   await restoreStudy(study);const reproduction=await analyzeBody();assertCoherent(reproduction,'The reported collar case');await saveArt('collar-reported-case.png');const cases=[];
+   for(const shading of ['cel','smooth']){
+    await page.locator(`[data-shading="${shading}"]`).click();await settlePreview();
+    for(const elevation of [20,45,70])for(const direction of [-120,-60,0,60,120]){
+     await page.evaluate(({direction,elevation})=>{for(const [field,value] of Object.entries({direction,elevation})){const input=document.querySelector('#light-'+field);input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));}},{direction,elevation});await settlePreview();
+     const result=await analyzeBody();assertCoherent(result,`${shading}/${direction}/${elevation}`);cases.push({shading,direction,elevation,...result});
+    }
+    for(const part of ['chest','shoulder','sleeve']){const relevant=cases.filter(view=>view.shading===shading&&view.body[part].count>=8);assert.ok(relevant.some(view=>view.body[part].dotRange>.1),`${part} has its own local source-facing volume in ${shading}`);assert.ok(relevant.some(view=>view.body[part].levels>=8),`${part} retains broad visible shading transitions in ${shading}`);}
+   }
+   await writeFile(new URL('body-lighting-matrix.json',out),JSON.stringify({reproduction,cases},null,2));
+  }finally{await restoreStudy(before);}
+ });
  await check('HEX RGB HSV and saturation/value gestures update the same color',async()=>{
   await page.locator('#hex').fill('#336699');await page.locator('#hex').press('Tab');assert.equal((await state()).study.colors[0].hex,'#336699');assert.equal(await page.locator('#rgb-r').inputValue(),'51');
   await page.locator('#rgb-r').fill('150');await page.locator('#rgb-r').press('Tab');assert.equal((await state()).study.colors[0].hex,'#966699');

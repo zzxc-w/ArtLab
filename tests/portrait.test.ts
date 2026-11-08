@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {buildRamp} from '../src/color.ts';
 import {createDefaultStudy} from '../src/library.ts';
 import {FLAT_SOURCE_COLORS,FIXED_PORTRAIT_COLORS,decodePortraitImage,buildPortraitRamps,samplePortraitSurface,normalFromHeight,canCastPortraitShadow,portraitOcclusion} from '../src/portrait-model.ts';
-import {sampleTaperedLock} from '../src/portrait-geometry.ts';
+import {sampleTaperedLock,portraitSurface,samplePortraitBody} from '../src/portrait-geometry.ts';
 import type {ShadowStyle} from '../src/types.ts';
 
 const study=createDefaultStudy(),light={...study.light,bounce:0};
@@ -12,6 +12,34 @@ const pixels=(width:number,height:number,rgb:readonly number[],alpha=254)=>{
  const result=new Uint8ClampedArray(width*height*4);for(let i=0;i<width*height;i++)result.set([...rgb,alpha],i*4);return result;
 };
 const normal={x:.8,y:0,z:.6};
+
+test('visible collar and costume pigments belong to the garment rather than the head geometry',()=>{
+ for(const material of [2,3,4,5,6])for(const u of [.56,.60,.64,.68])for(const v of [.33,.342,.35,.36,.38,.40]){
+  assert.equal(portraitSurface(material,u,v),2,`Garment pigment ${material} at ${u},${v} must not acquire hair tubes or the head's cast policy`);
+ }
+ assert.equal(portraitSurface(1,.64,.35),1,'A real hair strand above the collar retains its hair surface');
+ assert.equal(portraitSurface(0,.516,.35),3,'The visible neck remains separate from the garment');
+ assert.equal(portraitSurface(6,.48,.23),0,'Eye whites remain on the face rather than becoming a clothing surface');
+});
+
+test('body, collar, shoulder and sleeve normals are derivatives of the same continuous height used by casts',()=>{
+ const positions=[[.33,.58],[.39,.52],[.33,.64],[.74,.46],[.82,.72],[.64,.35],[.38,.39],[.29,.57],[.43,.61],[.76,.64],[.88,.68]],epsilon=1e-6;
+ for(const [u,v] of positions){
+  const sample=samplePortraitBody(u,v),du=(samplePortraitBody(u+epsilon,v).height-samplePortraitBody(u-epsilon,v).height)/(2*epsilon),dv=(samplePortraitBody(u,v+epsilon).height-samplePortraitBody(u,v-epsilon).height)/(2*epsilon);
+  assert.ok(Number.isFinite(sample.height)&&sample.height>0);assert.ok(Number.isFinite(sample.du)&&Number.isFinite(sample.dv));assert.ok(sample.formBlend>=0&&sample.formBlend<=1);
+  assert.ok(Math.abs(sample.du-du)<2e-5,`Body u derivative at ${u},${v} follows its actual height`);assert.ok(Math.abs(sample.dv-dv)<2e-5,`Body v derivative at ${u},${v} follows its actual height`);
+ }
+});
+
+test('chest shoulders and sleeves have independent local volume instead of one flat torso slope',()=>{
+ for(const [name,left,right] of [
+  ['chest',[.29,.57],[.43,.61]],['right shoulder',[.68,.46],[.82,.52]],['right sleeve',[.76,.64],[.88,.68]]
+ ] as const){
+  const a=samplePortraitBody(...left),b=samplePortraitBody(...right);assert.ok(a.du>.08&&b.du<-.02,`${name} has opposite local slopes around its own illustrated form`);
+ }
+ assert.ok(samplePortraitBody(.35,.59).formBlend>.85,'Broad chest volume can retain readable transitions under the cel treatment');
+ assert.ok(samplePortraitBody(.64,.35).formBlend<.6,'The outlined collar keeps a firmer planar treatment');
+});
 
 test('unlit portrait interiors use exact selected base colors for every finish and source position',()=>{
  const surfaceRamps=ramps();
