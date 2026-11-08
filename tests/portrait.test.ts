@@ -2,7 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {buildRamp} from '../src/color.ts';
 import {createDefaultStudy} from '../src/library.ts';
-import {FLAT_SOURCE_COLORS,FIXED_PORTRAIT_COLORS,decodePortraitImage,buildPortraitRamps,samplePortraitSurface,normalFromHeight,portraitOcclusion} from '../src/portrait-model.ts';
+import {FLAT_SOURCE_COLORS,FIXED_PORTRAIT_COLORS,decodePortraitImage,buildPortraitRamps,samplePortraitSurface,normalFromHeight,canCastPortraitShadow,portraitOcclusion} from '../src/portrait-model.ts';
+import {sampleTaperedLock} from '../src/portrait-geometry.ts';
 import type {ShadowStyle} from '../src/types.ts';
 
 const study=createDefaultStudy(),light={...study.light,bounce:0};
@@ -78,6 +79,33 @@ test('hair-lock height gradients create local depth whose illuminated side rever
  const flat=new Float32Array(width*height).fill(13);assert.deepEqual(normalFromHeight(flat,width,height,0,0),{x:-0,y:-0,z:1});
 });
 
+test('tapered-lock normals match numerical height derivatives and remain bounded at thin tips',()=>{
+ const rise=9,rootRadius=35,epsilon=1e-4;
+ const unitNormal=(cross:number,tangent:number)=>{const length=Math.hypot(cross,tangent,1);return [-cross/length,-tangent/length,1/length];};
+ for(const radius of [3,20,35])for(const radiusRate of [-.4,-.04,0,.15])for(const baseRate of [-.2,0,.18])for(const side of [-1.2,-.55,0,.4,1.1]){
+  const crossDistance=radius*side,section=sampleTaperedLock(rise,rootRadius,radius,radiusRate,crossDistance,baseRate);
+  // Walk across and along an actual locally tapered height field. The tangent
+  // walk changes both radius and base depth, without using either slope formula.
+  const heightAt=(cross:number,along:number)=>baseRate*along+sampleTaperedLock(rise,rootRadius,radius+radiusRate*along,radiusRate,crossDistance+cross,baseRate).height;
+  const cross=(heightAt(epsilon,0)-heightAt(-epsilon,0))/(2*epsilon),tangent=(heightAt(0,epsilon)-heightAt(0,-epsilon))/(2*epsilon);
+  const context=`radius ${radius}, taper ${radiusRate}, base ${baseRate}, side ${side}`;
+  assert.ok(Math.abs(cross-section.crossSlope)<2e-7,`Cross derivative: ${context}`);
+  assert.ok(Math.abs(tangent-section.tangentSlope)<2e-7,`Tangent derivative: ${context}`);
+  const analytical=unitNormal(section.crossSlope,section.tangentSlope),numerical=unitNormal(cross,tangent);
+  assert.ok(Math.hypot(...analytical.map((value,index)=>value-numerical[index]))<2e-7,`Surface normal: ${context}`);
+ }
+ const root=sampleTaperedLock(rise,rootRadius,rootRadius,-.3,rootRadius*.6,.1);
+ let previousHeight=root.height;
+ for(const widthRatio of [.1,.01,.001]){
+  const radius=rootRadius*widthRatio,tip=sampleTaperedLock(rise,rootRadius,radius,-.3,radius*.6,.1);
+  assert.ok(tip.height<previousHeight,'A narrowing lock loses height instead of keeping a steep constant-height ridge');
+  assert.ok(Math.abs(tip.height/root.height-widthRatio)<1e-12,'Tip height follows its shrinking width');
+  assert.ok(Math.abs(tip.crossSlope-root.crossSlope)<1e-12,'The cross slope stays bounded as the tip narrows');
+  assert.ok(Math.abs(tip.tangentSlope-root.tangentSlope)<1e-12,'The taper slope stays bounded as the tip narrows');
+  previousHeight=tip.height;
+ }
+});
+
 test('cast shadows follow raised geometry toward the source and disappear when the key is off',()=>{
  const width=9,height=3,depth=new Float32Array(width*height),coverage=new Uint8Array(width*height).fill(255),x=3,y=1;
  const right={...light,strength:1,direction:90,elevation:20};
@@ -87,4 +115,62 @@ test('cast shadows follow raised geometry toward the source and disappear when t
  assert.equal(portraitOcclusion(depth,coverage,width,height,x,y,{...right,direction:-90}),0);
  assert.equal(portraitOcclusion(depth,coverage,width,height,x,y,{...right,strength:0}),0);
  coverage[y*width+4]=0;assert.equal(portraitOcclusion(depth,coverage,width,height,x,y,right),0,'Transparent pixels cannot occlude the light');
+});
+
+// Geometry surface ownership deliberately does not use the pigment/material map.
+const FACE=0,HAIR=1,BODY=2,NECK=3,FRONT_HAIR=4,BACK_HAIR=5;
+const shadowFixture=(receiver:number,caster:number)=>{
+ const width=9,height=3,x=3,y=1,index=y*width+x,blocker=index+1;
+ const depth=new Float32Array(width*height),coverage=new Uint8Array(width*height).fill(255),surface=new Uint8Array(width*height).fill(receiver);
+ surface[blocker]=caster;depth[blocker]=4;
+ const source={...light,strength:1,direction:90,elevation:20};
+ return {depth,coverage,surface,index,blocker,source,cast:(settings=source)=>portraitOcclusion(depth,coverage,width,height,x,y,settings,surface)};
+};
+
+test('portrait shadow policy rejects invalid surface IDs and every hair receiver',()=>{
+ for(const receiver of [HAIR,FRONT_HAIR,BACK_HAIR,-1,6,255,NaN,.5])for(let caster=0;caster<=5;caster++)assert.equal(canCastPortraitShadow(receiver,caster),false);
+ for(const receiver of [FACE,BODY,NECK])for(const caster of [-1,6,255,NaN,1.5])assert.equal(canCastPortraitShadow(receiver,caster),false);
+ for(const receiver of [HAIR,FRONT_HAIR,BACK_HAIR]){
+  const fixture=shadowFixture(receiver,FRONT_HAIR);
+  assert.equal(fixture.cast(),0,'A raised nearby lock cannot terrain-shadow another hair surface');
+ }
+});
+
+test('raised face bumps and cloth ridges shade locally without casting terrain shadows',()=>{
+ for(const receiver of [FACE,BODY]){
+  const fixture=shadowFixture(receiver,receiver);
+  assert.ok(portraitOcclusion(fixture.depth,fixture.coverage,9,3,3,1,fixture.source)>.9,'The synthetic ridge is high enough to cast without semantic ownership');
+  assert.equal(fixture.cast(),0,'Relief within one face or garment must not create a cast band');
+ }
+});
+
+test('foreground hair casts on the face and body only from the source direction and above the receiver',()=>{
+ for(const receiver of [FACE,BODY])for(const caster of [HAIR,FRONT_HAIR]){
+  const fixture=shadowFixture(receiver,caster);
+  assert.ok(fixture.cast()>.9,'A raised foreground hair overlap casts on the receiving surface');
+  assert.equal(fixture.cast({...fixture.source,direction:-90}),0,'Moving the source away from the blocker removes its cast');
+  fixture.depth[fixture.blocker]=fixture.depth[fixture.index];
+  assert.equal(fixture.cast(),0,'Semantic ownership cannot create a cast without positive height');
+  fixture.depth[fixture.blocker]=-4;
+  assert.equal(fixture.cast(),0,'Hair behind the receiving surface cannot block the source');
+ }
+});
+
+test('back hair cannot cast on foreground surfaces while a raised face can cast onto the neck',()=>{
+ for(const receiver of [FACE,BODY,NECK])assert.equal(shadowFixture(receiver,BACK_HAIR).cast(),0);
+ const neck=shadowFixture(NECK,FACE);
+ assert.ok(neck.cast()>.9,'The face can create a directional chin cast on the neck');
+ assert.equal(neck.cast({...neck.source,direction:-90}),0);
+ assert.equal(shadowFixture(FACE,NECK).cast(),0,'The neck cannot cast back onto the face');
+});
+
+test('semantic casts respect a disabled key, transparent blockers and surface-map dimensions',()=>{
+ const fixture=shadowFixture(FACE,FRONT_HAIR);
+ assert.ok(fixture.cast()>.9);
+ assert.equal(fixture.cast({...fixture.source,strength:0}),0);
+ fixture.coverage[fixture.blocker]=0;assert.equal(fixture.cast(),0);
+ fixture.coverage[fixture.blocker]=255;
+ assert.equal(portraitOcclusion(fixture.depth,fixture.coverage,9,3,3,1,fixture.source,new Uint8Array(26)),0);
+ fixture.surface[fixture.index]=255;assert.equal(fixture.cast(),0,'Unknown receivers cannot receive terrain casts');
+ fixture.surface[fixture.index]=FACE;fixture.surface[fixture.blocker]=255;assert.equal(fixture.cast(),0,'Unknown casters cannot shadow a known surface');
 });

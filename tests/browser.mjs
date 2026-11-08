@@ -21,6 +21,7 @@ try{
  const state=()=>page.evaluate(()=>window.artlabDiagnostics());const art=()=>page.locator('#preview').screenshot();
  const settlePreview=async()=>{await page.waitForFunction(()=>window.artlabDiagnostics?.().portrait?.ready);await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));};
  const setLight=async(key,value)=>{await page.locator('#light-'+key).evaluate((input,value)=>{input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));},value);await settlePreview();};
+ const setLive=async enabled=>{const control=page.locator('#live-lighting');if(await control.isChecked()!==enabled)await control.setChecked(enabled);await settlePreview();};
  const rawArtHash=()=>page.locator('#preview').evaluate(async canvas=>{const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;const digest=await crypto.subtle.digest('SHA-256',pixels);return Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('');});
  const saveArt=async name=>{const png=await page.locator('#preview').evaluate(canvas=>canvas.toDataURL());await writeFile(new URL(name,out),Buffer.from(png.split(',')[1],'base64'));};
  const restoreStudy=async study=>{await page.locator('#palette-file').setInputFiles({name:'restore-browser-study.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify({format:'artlab',version:2,study}))});await page.waitForFunction(expected=>{const actual=window.artlabDiagnostics().study;return Object.entries(expected).every(([key,value])=>key==='light'?Object.entries(value).every(([field,v])=>actual.light[field]===v):key==='colors'?value.length===actual.colors.length&&value.every((color,index)=>Object.entries(color).every(([field,v])=>actual.colors[index][field]===v)):actual[key]===value);},study);await settlePreview();};
@@ -45,16 +46,17 @@ try{
   {name:'charcoal inner costume',material:4,u:.33,v:.58},
   {name:'gray shoulder armor',material:5,u:.74,v:.46},
  ];
- const materialSamples=(landmarks=materialLandmarks)=>page.locator('#preview').evaluate((canvas,landmarks)=>{
+ const materialSamples=(landmarks=materialLandmarks,alignGeometry=false)=>page.locator('#preview').evaluate((canvas,{landmarks,alignGeometry})=>{
   const context=canvas.getContext('2d'),bounds=canvas.getBoundingClientRect();
   return landmarks.map(landmark=>{
-   const probe=window.artlabPortraitProbe?.(landmark.u,landmark.v);
+   let probe=window.artlabPortraitProbe?.(landmark.u,landmark.v);
    if(!probe)return {...landmark,probe:null};
    const x=Math.round(probe.x*canvas.width/bounds.width),y=Math.round(probe.y*canvas.height/bounds.height);
    if(x<0||y<0||x>=canvas.width||y>=canvas.height)return {...landmark,probe,pixel:null};
+   if(alignGeometry){const origin=window.artlabPortraitProbe(0,0),end=window.artlabPortraitProbe(1,1),u=((x+.5)*bounds.width/canvas.width-origin.x)/(end.x-origin.x),v=((y+.5)*bounds.height/canvas.height-origin.y)/(end.y-origin.y);probe=window.artlabPortraitProbe(u,v);}
    return {...landmark,probe,pixel:Array.from(context.getImageData(x,y,1,1).data)};
   });
- },landmarks);
+ },{landmarks,alignGeometry});
  const rgb=hex=>[1,3,5].map(offset=>parseInt(hex.slice(offset,offset+2),16));
  const assertInterior=(sample,hex)=>{
   assert.ok(sample.probe,`${sample.name} has a decoded material probe`);
@@ -70,6 +72,39 @@ try{
  await check('the unlit flat-color portrait is bundled and fully decoded without loading the painted source',async()=>{
   const bytes=await readFile(new URL('../src/assets/portrait-flats.png',import.meta.url));assert.equal(bytes.toString('hex',0,8),'89504e470d0a1a0a');assert.equal(bytes.readUInt32BE(16),1024);assert.equal(bytes.readUInt32BE(20),1536);
   const portrait=(await state()).portrait;assert.equal(portrait.ready,true);assert.ok(!portrait.error);assert.ok(portraitResponses.some(response=>response.status===200),'The local unlit portrait asset loaded successfully');assert.deepEqual(paintedPortraitResponses,[],'The obsolete painted artwork is not a runtime dependency');await saveArt('flat-portrait-default.png');
+ });
+ await check('manual lighting is the default and keeps dragging sliders and exports separate from the applied preview',async()=>{
+  const before=(await state()).study;
+  try{
+   assert.equal((await state()).liveLighting,false);assert.equal(await page.locator('#live-lighting').isChecked(),false);assert.equal(await page.locator('#key-light').isDisabled(),true);
+   await page.locator('.art-stage').scrollIntoViewIfNeeded();await settlePreview();
+   const initial=await state(),picture=await rawArtHash(),handle=await page.locator('#key-light').boundingBox(),canvas=await page.locator('#preview').boundingBox();
+   await page.locator('#color-list [data-select="hair"]').click();await settlePreview();assert.equal((await state()).previewDraws,initial.previewDraws,'Selecting a portrait swatch does not repaint unchanged artwork');await page.locator('#color-list [data-select="skin"]').click();await settlePreview();
+   assert.ok(handle&&canvas);await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down();await page.mouse.move(canvas.x+canvas.width-64,canvas.y+canvas.height/2,{steps:4});await page.mouse.up();
+   await page.locator('#key-light').evaluate(button=>button.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true})));await settlePreview();
+   assert.deepEqual((await state()).study.light,initial.study.light,'An inactive source cannot be dragged or moved with a key');assert.deepEqual((await state()).draftLight,initial.draftLight);
+   await page.locator('[data-preset="moonlight"]').click();await settlePreview();assert.deepEqual((await state()).appliedLight,initial.appliedLight,'A manual preset queues its light without changing the preview');assert.equal((await state()).pendingLighting,true);assert.equal((await state()).previewDraws,initial.previewDraws);await page.locator('#reset-light').click();await settlePreview();assert.deepEqual((await state()).appliedLight,initial.appliedLight,'Reset is also deferred in manual mode');assert.equal((await state()).previewDraws,initial.previewDraws);
+   await page.locator('#ambient').evaluate(input=>{input.value='#123abc';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));});await settlePreview();assert.equal((await state()).draftLight.ambient,'#123ABC');
+   await setLight('direction',initial.study.light.direction===85?-85:85);await setLight('temperature',-.65);await setLight('strength',.91);
+   const pending=await state();assert.equal(pending.pendingLighting,true);assert.deepEqual(pending.study.light,initial.study.light);assert.deepEqual(pending.appliedLight,initial.study.light);assert.equal(await rawArtHash(),picture,'Changing pending lighting does not redraw a different image');assert.equal(pending.previewDraws,initial.previewDraws,'Pending slider edits do not render the expensive preview');
+   assert.equal(pending.draftLight.temperature,-.65);assert.equal(pending.draftLight.strength,.91);assert.equal(await page.locator('#apply-lighting').isEnabled(),true);
+   await page.locator('.export-menu summary').click();const waiting=page.waitForEvent('download');await page.locator('[data-export="json"]').click();const exported=await waiting,path=new URL('manual-applied-light.json',out).pathname.replace(/^\/([A-Z]:)/,'$1');await exported.saveAs(path);const json=JSON.parse(await readFile(path,'utf8'));assert.deepEqual(json.study.light,initial.study.light,'Portable palettes export the applied light rather than unseen pending edits');assert.equal(Object.hasOwn(json.study,'draftLight'),false);
+   await page.locator('#hex').fill('#E96F53');await page.locator('#hex').press('Tab');await settlePreview();const colored=await state();assert.equal(colored.study.colors[0].hex,'#E96F53');assert.notEqual(await rawArtHash(),picture,'Color edits remain visible while live lighting is off');assert.deepEqual(colored.appliedLight,initial.study.light);assert.deepEqual(colored.draftLight,pending.draftLight);assert.equal(colored.pendingLighting,true);
+   const coloredPicture=await rawArtHash();await page.locator('#discard-lighting').click();await settlePreview();const discarded=await state();assert.equal(discarded.pendingLighting,false);assert.deepEqual(discarded.draftLight,discarded.appliedLight);assert.deepEqual(discarded.appliedLight,initial.study.light);assert.equal(discarded.previewDraws,colored.previewDraws,'Discarding pending settings does no canvas work');assert.equal(await rawArtHash(),coloredPicture);assert.equal(await page.locator('#apply-lighting').isDisabled(),true);
+   for(const [key,value] of Object.entries(pending.draftLight)){if(key==='ambient'){await page.locator('#ambient').evaluate((input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));},value);}else await setLight(key,value);}await settlePreview();assert.deepEqual((await state()).draftLight,pending.draftLight);assert.equal((await state()).previewDraws,colored.previewDraws);
+   const drawCount=colored.previewDraws;await page.locator('#apply-lighting').click();await settlePreview();const applied=await state();assert.deepEqual(applied.study.light,pending.draftLight);assert.deepEqual(applied.appliedLight,pending.draftLight);assert.equal(applied.pendingLighting,false);assert.ok(applied.previewDraws>drawCount);assert.equal(applied.previewQuality,'final');assert.equal(await page.locator('#apply-lighting').isDisabled(),true);
+   await saveArt('manual-lighting-applied.png');
+  }finally{await restoreStudy(before);await setLive(false);}
+ });
+ await check('live lighting is optional remembered and explicitly applies pending settings when enabled',async()=>{
+  const before=(await state()).study;
+  try{
+   await setLive(false);await page.reload();await waitForStudy();assert.equal((await state()).liveLighting,false);assert.equal(await page.locator('#key-light').isDisabled(),true);
+   await setLight('direction',before.light.direction===72?-72:72);const draft=(await state()).draftLight;assert.equal((await state()).pendingLighting,true);
+   await setLive(true);const active=await state();assert.equal(active.liveLighting,true);assert.equal(active.pendingLighting,false);assert.deepEqual(active.appliedLight,draft);assert.equal(await page.locator('#key-light').isEnabled(),true);
+   await page.waitForFunction(direction=>JSON.parse(localStorage.getItem('artlab.study.v2')||'null')?.light.direction===direction,draft.direction);await page.reload();await waitForStudy();assert.equal((await state()).liveLighting,true);assert.deepEqual((await state()).appliedLight,draft);assert.equal(await page.locator('#live-lighting').isChecked(),true);
+   const light=(await state()).appliedLight;await setLive(false);assert.deepEqual((await state()).appliedLight,light,'Disabling interactivity freezes the current illumination rather than turning it off');assert.equal((await state()).pendingLighting,false);
+  }finally{await restoreStudy(before);await setLive(true);}
  });
  await check('base-colors toggle restores key strength and every material interior displays its exact editable base without region leakage',async()=>{
   const before=(await state()).study,flatColors=['#FF8A47','#FFFFFF','#000000','#00FFFF'],edits=['#58C5FF','#FF4B82','#A3EE68','#824DFF'],fixedColors={4:'#413C46',5:'#9F989D'},materialReport={flats:{},edits:[]};
@@ -93,14 +128,15 @@ try{
   }finally{await restoreStudy(before);}
  });
  await check('neighboring faces of one hair lock have local opposing normals and reverse their actual shading with the key',async()=>{
-  const before=(await state()).study,pair=[{name:'left face of front fringe',material:1,u:.345,v:.17},{name:'right face of front fringe',material:1,u:.38,v:.17}],brightness=sample=>sample.pixel[0]*.2126+sample.pixel[1]*.7152+sample.pixel[2]*.0722;
+  const before=(await state()).study,pair=[{name:'left face of front fringe',material:1,u:.345,v:.17},{name:'right face of front fringe',material:1,u:.3725,v:.17}],brightness=sample=>sample.pixel[0]*.2126+sample.pixel[1]*.7152+sample.pixel[2]*.0722;
   try{
    await restoreStudy({...before,preview:'portrait',values:false,shading:'smooth',shadowStyle:'soft',colors:before.colors.map((color,index)=>index===1?{...color,hex:'#A0A0A0'}:color),light:{...before.light,temperature:0,hueShift:0,saturation:1,bounce:0,ambient:'#808080',shadow:.8,strength:1,elevation:25,direction:-90}});
-   const normals=await materialSamples(pair);for(const sample of normals){assert.equal(sample.probe.material,1);assert.equal(sample.probe.ink,0);assert.equal(sample.probe.alpha,1);assert.ok(Math.abs(Math.hypot(...Object.values(sample.probe.normal))-1)<1e-5,'The local surface normal is normalized');}
+   const normals=await materialSamples(pair,true);for(const sample of normals){assert.equal(sample.probe.material,1);assert.equal(sample.probe.ink,0);assert.equal(sample.probe.alpha,1);assert.ok(Math.abs(Math.hypot(...Object.values(sample.probe.normal))-1)<1e-5,'The local surface normal is normalized');}
    assert.ok(normals[0].probe.normal.x<-.2&&normals[1].probe.normal.x>.2,'Two nearby faces of the same drawn fringe point in opposite horizontal directions');
-   const left=await materialSamples(pair);await saveArt('hair-lock-left.png');await setLight('direction',90);const right=await materialSamples(pair);await saveArt('hair-lock-right.png');
-   assert.ok(brightness(left[0])>brightness(right[0])+10,'The left-facing lock is visibly brighter under the left source');assert.ok(brightness(right[1])>brightness(left[1])+10,'The right-facing lock is visibly brighter under the right source');
+   const left=await materialSamples(pair,true);await saveArt('hair-lock-left.png');await setLight('direction',90);const right=await materialSamples(pair,true);await saveArt('hair-lock-right.png');
    await writeFile(new URL('hair-lock-report.json',out),JSON.stringify({left,right},null,2));
+   assert.ok(brightness(left[0])>brightness(right[0])+10,'The left-facing lock is visibly brighter under the left source');assert.ok(brightness(right[1])>brightness(left[1])+10,'The right-facing lock is visibly brighter under the right source');
+   for(const direction of [-90,90]){await setLight('direction',direction);const hairCasts=await page.evaluate(points=>points.map(point=>({name:point.name,...window.artlabPortraitLightProbe(point.u,point.v)})),materialLandmarks.filter(point=>point.material===1));for(const point of hairCasts)assert.equal(point.occlusion,0,`${point.name} receives its form shading without a contradictory terrain self-shadow`);}
   }finally{await restoreStudy(before);}
  });
  await check('HEX RGB HSV and saturation/value gestures update the same color',async()=>{
@@ -148,15 +184,15 @@ try{
    await setLight('direction',-35);await setLight('elevation',40);await setLight('strength',1);await page.locator('.art-stage').scrollIntoViewIfNeeded();await settlePreview();
    const handle=page.locator('#key-light'),box=await handle.boundingBox(),canvas=await page.locator('#preview').boundingBox();assert.ok(box&&canvas);
    const start=(await state()).study.light.direction;await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();assert.equal((await state()).study.light.direction,start,'Grabbing the guide does not move the light');
-   await page.mouse.move(canvas.x+canvas.width-64,canvas.y+canvas.height/2,{steps:8});await page.mouse.up();await settlePreview();const dragged=await state();assert.ok(Math.abs(dragged.study.light.direction-90)<=1);assert.ok(dragged.lightVector.x>0);assert.ok(Math.abs(dragged.lightVector.y)<.02);assert.equal(Number(await page.locator('#light-direction').inputValue()),dragged.study.light.direction);
+   await page.mouse.move(canvas.x+canvas.width-64,canvas.y+canvas.height/2,{steps:8});await page.waitForFunction(()=>window.artlabDiagnostics().previewQuality==='interactive');assert.equal((await state()).previewQuality,'interactive','Dragging uses the lightweight preview');await page.mouse.up();await settlePreview();const dragged=await state();assert.equal(dragged.previewQuality,'final','Releasing the source restores full preview quality');assert.ok(Math.abs(dragged.study.light.direction-90)<=1);assert.ok(dragged.lightVector.x>0);assert.ok(Math.abs(dragged.lightVector.y)<.02);assert.equal(Number(await page.locator('#light-direction').inputValue()),dragged.study.light.direction);
    await handle.press('ArrowLeft');assert.equal((await state()).study.light.direction,dragged.study.light.direction-5);const z=(await state()).lightVector.z;await handle.press('ArrowUp');assert.equal((await state()).study.light.elevation,45);assert.ok((await state()).lightVector.z>z);
    await settlePreview();const marker=await handle.boundingBox();await setLight('elevation',70);const depth=await state(),deeperMarker=await handle.boundingBox();assert.equal(depth.study.light.elevation,70);assert.ok(Math.abs(depth.lightVector.z-Math.sin(70*Math.PI/180))<1e-8);assert.ok(Math.abs(marker.x-deeperMarker.x)<.1&&Math.abs(marker.y-deeperMarker.y)<.1,'Depth does not relocate the angle guide');assert.match(await page.locator('#light-description').textContent(),/front depth 70/);
    for(const subject of ['portrait','spheres'])for(const finish of ['cel','smooth']){
     await page.locator(`[data-preview="${subject}"]`).click();await page.locator(`[data-shading="${finish}"]`).click();await setLight('elevation',35);
     await setLight('strength',1);await setLight('direction',-90);const litLeft=await rawArtHash();await setLight('direction',90);assert.notEqual(await rawArtHash(),litLeft,`${subject}/${finish} shades toward the actual key`);
-    await setLight('strength',0);await setLight('direction',-90);const keyOffLeft=await rawArtHash();const leftDebug=await page.locator('#preview').evaluate(canvas=>{window.artlabKeyOffPixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);return {png:canvas.toDataURL(),light:window.artlabDiagnostics().study.light};});await setLight('direction',90);const keyOffRight=await rawArtHash();
+    await setLight('strength',0);await setLight('direction',-90);const keyOffLeft=await rawArtHash(),keyOffDraws=(await state()).previewDraws;const leftDebug=await page.locator('#preview').evaluate(canvas=>{window.artlabKeyOffPixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);return {png:canvas.toDataURL(),light:window.artlabDiagnostics().study.light};});await setLight('direction',90);const keyOffRight=await rawArtHash();assert.equal((await state()).previewDraws,keyOffDraws,`${subject}/${finish} does no canvas work for a disabled source move`);
     if(keyOffRight!==keyOffLeft){const rightDebug=await page.locator('#preview').evaluate(canvas=>{const a=window.artlabKeyOffPixels,b=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);let count=0,maximum=0,significant=0,left=canvas.width,top=canvas.height,right=-1,bottom=-1;for(let i=0;i<b.data.length;i+=4){const difference=Math.max(...[0,1,2,3].map(channel=>Math.abs(a.data[i+channel]-b.data[i+channel])));maximum=Math.max(maximum,difference);if(difference>0)count++;if(difference>2){significant++;const p=i/4,x=p%canvas.width,y=Math.floor(p/canvas.width);left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);}}return {png:canvas.toDataURL(),light:window.artlabDiagnostics().study.light,diff:{count,maximum,significant,left,right,top,bottom,width:canvas.width,height:canvas.height}};});await writeFile(new URL('key-off-left.png',out),Buffer.from(leftDebug.png.split(',')[1],'base64'));await writeFile(new URL('key-off-right.png',out),Buffer.from(rightDebug.png.split(',')[1],'base64'));console.log(JSON.stringify({subject,finish,leftLight:leftDebug.light,rightLight:rightDebug.light,diff:rightDebug.diff}));}
-    assert.equal(keyOffRight,keyOffLeft,`${subject}/${finish} has no unexplained left/right shading at zero key strength`);assert.match(await page.locator('#light-description').textContent(),/Key off/);
+    assert.equal(keyOffRight,keyOffLeft,`${subject}/${finish} has no unexplained left/right shading at zero key strength`);assert.match(await page.locator('#light-description').textContent(),/Key off/);if(subject==='portrait'){const keyOffCast=await page.evaluate(()=>window.artlabPortraitLightProbe(.48,.25));assert.equal(keyOffCast.occlusion,0,'A disabled source cannot retain a cached cast shadow');}
    }
   }finally{await restoreStudy(before);}
  });

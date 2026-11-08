@@ -19,9 +19,9 @@ const imageCache=new Map<string,HTMLCanvasElement>();
 /** Local anime material study. The drawn forms share the source vector/depth
  * used by the visible handle and sphere study, with local hair/nose/chin casts.
  */
-export function renderPreview(canvas:HTMLCanvasElement,study:Study,ramps:Ramp[],options?:{width?:number;height?:number;export?:boolean}):void {
+export function renderPreview(canvas:HTMLCanvasElement,study:Study,ramps:Ramp[],options?:{width?:number;height?:number;export?:boolean;interactive?:boolean}):void {
   const width=clamp(options?.width??(canvas.clientWidth||680),1,4096),height=clamp(options?.height??(canvas.clientHeight||640),1,4096);
-  const dpr=options?.export?1:Math.min(window.devicePixelRatio||1,2);
+  const dpr=options?.export?1:Math.min(window.devicePixelRatio||1,options?.interactive?1:2);
   const targetWidth=Math.max(1,Math.round(width*dpr)),targetHeight=Math.max(1,Math.round(height*dpr));
   if(canvas.width!==targetWidth)canvas.width=targetWidth;if(canvas.height!==targetHeight)canvas.height=targetHeight;
   const context=canvas.getContext('2d');if(!context)return;

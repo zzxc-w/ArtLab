@@ -105,15 +105,27 @@ function shadowRay(width:number,height:number,light:LightSettings):typeof previo
  });previousWidth=width;previousHeight=height;previousDirection=light.direction;previousElevation=light.elevation;return previousRay;
 }
 
+/** Geometry surface IDs are independent of paint/material IDs: face 0, hair 1,
+ * body 2, neck 3, front hair 4 and back hair 5. Hair slopes shade locally but
+ * never receive terrain casts; only foreground overlaps may cast on skin or cloth. */
+export function canCastPortraitShadow(receiver:number,caster:number):boolean {
+ if(receiver===0||receiver===2)return caster===1||caster===4;
+ if(receiver===3)return caster===0||caster===1||caster===4;
+ return false;
+}
+
 /** Trace toward the source, so a raised object on the right casts to its left.
- * A small bounded ray set keeps the portrait practical on tablet CPUs. */
-export function portraitOcclusion(depth:Float32Array,coverage:Uint8Array,width:number,height:number,x:number,y:number,light:LightSettings):number {
- if(light.strength<=0||x<0||x>=width||y<0||y>=height||depth.length!==width*height||coverage.length!==width*height)return 0;
+ * A small bounded ray set keeps the portrait practical on tablet CPUs. An
+ * optional geometry surface map limits casts to meaningful foreground overlaps. */
+export function portraitOcclusion(depth:Float32Array,coverage:Uint8Array,width:number,height:number,x:number,y:number,light:LightSettings,surface?:Uint8Array):number {
+ if(light.strength<=0||x<0||x>=width||y<0||y>=height||depth.length!==width*height||coverage.length!==width*height||(surface&&surface.length!==width*height))return 0;
  const index=y*width+x;if(coverage[index]<96)return 0;
+ const receiver=surface?.[index];if(surface&&receiver!==0&&receiver!==2&&receiver!==3)return 0;
  const origin=depth[index];let result=0;
  for(const step of shadowRay(width,height,light)){
   const xx=Math.round(x+step.dx),yy=Math.round(y+step.dy);if(xx<0||xx>=width||yy<0||yy>=height)break;
   const sample=yy*width+xx;if(sample===index||coverage[sample]<96)continue;
+  if(surface&&!canCastPortraitShadow(receiver!,surface[sample]))continue;
   result=Math.max(result,clamp((depth[sample]-origin-step.dz-.35)/1.5));if(result===1)return 1;
  }
  return result;
