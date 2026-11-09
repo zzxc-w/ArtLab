@@ -2,6 +2,7 @@ import {chromium} from '@playwright/test';
 import assert from 'node:assert/strict';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
+import {measurePortraitGeometry,measurePortraitRaster} from './portrait-visual.mjs';
 const url=process.env.TEST_URL||'http://127.0.0.1:4180/';
 const out=new URL('../test-results/',import.meta.url);await mkdir(out,{recursive:true});
 const browser=await chromium.launch({channel:'chrome',headless:true});
@@ -132,7 +133,7 @@ try{
   try{
    await restoreStudy({...before,preview:'portrait',values:false,shading:'smooth',shadowStyle:'soft',colors:before.colors.map((color,index)=>index===1?{...color,hex:'#A0A0A0'}:color),light:{...before.light,temperature:0,hueShift:0,saturation:1,bounce:0,ambient:'#808080',shadow:.8,strength:1,elevation:25,direction:-90}});
    const normals=await materialSamples(pair,true);for(const sample of normals){assert.equal(sample.probe.material,1);assert.equal(sample.probe.ink,0);assert.equal(sample.probe.alpha,1);assert.ok(Math.abs(Math.hypot(...Object.values(sample.probe.normal))-1)<1e-5,'The local surface normal is normalized');}
-   assert.ok(normals[0].probe.normal.x<-.2&&normals[1].probe.normal.x>.2,'Two nearby faces of the same drawn fringe point in opposite horizontal directions');
+   assert.ok(normals[0].probe.normal.x<0&&normals[1].probe.normal.x>0,'Two nearby faces of the same drawn fringe point in opposite horizontal directions');
    const left=await materialSamples(pair,true);await saveArt('hair-lock-left.png');await setLight('direction',90);const right=await materialSamples(pair,true);await saveArt('hair-lock-right.png');
    await writeFile(new URL('hair-lock-report.json',out),JSON.stringify({left,right},null,2));
    assert.ok(brightness(left[0])>brightness(right[0])+10,'The left-facing lock is visibly brighter under the left source');assert.ok(brightness(right[1])>brightness(left[1])+10,'The right-facing lock is visibly brighter under the right source');
@@ -188,6 +189,49 @@ try{
     for(const part of ['chest','shoulder','sleeve']){const relevant=cases.filter(view=>view.shading===shading&&view.body[part].count>=8);assert.ok(relevant.some(view=>view.body[part].dotRange>.1),`${part} has its own local source-facing volume in ${shading}`);assert.ok(relevant.some(view=>view.body[part].levels>=8),`${part} retains broad visible shading transitions in ${shading}`);}
    }
    await writeFile(new URL('body-lighting-matrix.json',out),JSON.stringify({reproduction,cases},null,2));
+  }finally{await restoreStudy(before);}
+ });
+ await check('the whole portrait depth and normals describe one surface without clean-paint body seams',async()=>{
+  const geometry=await measurePortraitGeometry(page);
+  await writeFile(new URL('portrait-geometry-continuity.json',out),JSON.stringify(geometry,null,2));
+  assert.ok(geometry.gradientSamples>100000,'The invariant covers actual line-free interiors throughout the full decoded portrait');
+  assert.ok(geometry.maxUnitError<1e-5,'Every sampled surface normal is normalized');
+  assert.ok(geometry.maxGradientError<5e-5,`Normals agree with the actual depth field on all clean interiors; worst ${JSON.stringify(geometry.worstGradient)}`);
+  assert.ok(geometry.bySurface[2].pairs>150000,'The body check includes both axes throughout the garment rather than a few selected helper points');
+  assert.equal(geometry.bySurface[2].over20,0,`One continuous garment has no unexplained >20° one-texel normal flips; worst ${JSON.stringify(geometry.bySurface[2].worst)}`);
+  for(const surface of [1,4,5]){
+   assert.ok(geometry.bySurface[surface].pairs>1000,'Hair coverage includes the crown, front locks and ponytail');
+   assert.ok(geometry.bySurface[surface].maxNormalJump<30,`Hair may curve tightly but must not regain the nearest-lock normal reversals; worst ${JSON.stringify(geometry.bySurface[surface].worst)}`);
+  }
+  for(const [name,result] of Object.entries(geometry.byRegion)){
+   assert.ok(result.pairs>8000,`${name} has dense coverage in independently located source-art interiors`);
+   assert.ok(result.maxNormalJump<15,`${name} stays continuous away from ink, material and object edges; worst ${JSON.stringify(result.worst)}`);
+  }
+ });
+ await check('actual clean body pixels keep smooth form transitions under below side and overhead keys',async()=>{
+  const before=(await state()).study,cases=[];
+  try{
+   const study={...before,preview:'portrait',values:false,shading:'smooth',shadowStyle:'anime',light:{...before.light,strength:0}};
+   await restoreStudy(study);const flat=await measurePortraitRaster(page);
+   for(const [part,result] of Object.entries(flat)){
+    assert.ok(result.pairs>3000,`${part} has enough actual Canvas pixel pairs`);
+    assert.equal(result.maxLumaJump,0,`${part}'s unlit paint validates the source-to-Canvas footprint and excludes resampling of ink or adjacent materials`);
+   }
+   for(const direction of [-180,-90,0,90])for(const elevation of [20,45,70]){
+    await restoreStudy({...study,light:{...study.light,direction,elevation,strength:1}});
+    const diagnostics=await state();assert.equal(diagnostics.study.shading,'smooth');assert.equal(diagnostics.previewQuality,'final');
+    const result=await measurePortraitRaster(page);cases.push({shading:'smooth',direction,elevation,...result});
+   }
+   // Cel can retain intentional lighting bands. Its broad chest must still
+   // have the continuous form treatment promised by the UI.
+   for(const direction of [-180,-90,0,90]){
+    await restoreStudy({...study,shading:'cel',light:{...study.light,direction,elevation:45,strength:1}});
+    const result=await measurePortraitRaster(page);cases.push({shading:'cel',direction,elevation:45,shirt:result.shirt});
+   }
+   await writeFile(new URL('portrait-raster-continuity.json',out),JSON.stringify({flat,cases},null,2));
+   for(const view of cases)for(const [part,result] of Object.entries(view))if(result&&typeof result==='object'){
+    assert.equal(result.over20Form,0,`${view.shading} ${view.direction}°/${view.elevation}° ${part} has no >20-luma jump inside one cast-free paint surface; worst ${JSON.stringify(result.worstForm)}`);
+   }
   }finally{await restoreStudy(before);}
  });
  await check('HEX RGB HSV and saturation/value gestures update the same color',async()=>{

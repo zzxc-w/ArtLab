@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {buildRamp} from '../src/color.ts';
 import {createDefaultStudy} from '../src/library.ts';
 import {FLAT_SOURCE_COLORS,FIXED_PORTRAIT_COLORS,decodePortraitImage,buildPortraitRamps,samplePortraitSurface,normalFromHeight,canCastPortraitShadow,portraitOcclusion} from '../src/portrait-model.ts';
-import {sampleTaperedLock,portraitSurface,samplePortraitBody} from '../src/portrait-geometry.ts';
+import {buildPortraitGeometry,portraitSurface,samplePortraitBody} from '../src/portrait-geometry.ts';
 import type {ShadowStyle} from '../src/types.ts';
 
 const study=createDefaultStudy(),light={...study.light,bounce:0};
@@ -107,31 +107,53 @@ test('hair-lock height gradients create local depth whose illuminated side rever
  const flat=new Float32Array(width*height).fill(13);assert.deepEqual(normalFromHeight(flat,width,height,0,0),{x:-0,y:-0,z:1});
 });
 
-test('tapered-lock normals match numerical height derivatives and remain bounded at thin tips',()=>{
- const rise=9,rootRadius=35,epsilon=1e-4;
- const unitNormal=(cross:number,tangent:number)=>{const length=Math.hypot(cross,tangent,1);return [-cross/length,-tangent/length,1/length];};
- for(const radius of [3,20,35])for(const radiusRate of [-.4,-.04,0,.15])for(const baseRate of [-.2,0,.18])for(const side of [-1.2,-.55,0,.4,1.1]){
-  const crossDistance=radius*side,section=sampleTaperedLock(rise,rootRadius,radius,radiusRate,crossDistance,baseRate);
-  // Walk across and along an actual locally tapered height field. The tangent
-  // walk changes both radius and base depth, without using either slope formula.
-  const heightAt=(cross:number,along:number)=>baseRate*along+sampleTaperedLock(rise,rootRadius,radius+radiusRate*along,radiusRate,crossDistance+cross,baseRate).height;
-  const cross=(heightAt(epsilon,0)-heightAt(-epsilon,0))/(2*epsilon),tangent=(heightAt(0,epsilon)-heightAt(0,-epsilon))/(2*epsilon);
-  const context=`radius ${radius}, taper ${radiusRate}, base ${baseRate}, side ${side}`;
-  assert.ok(Math.abs(cross-section.crossSlope)<2e-7,`Cross derivative: ${context}`);
-  assert.ok(Math.abs(tangent-section.tangentSlope)<2e-7,`Tangent derivative: ${context}`);
-  const analytical=unitNormal(section.crossSlope,section.tangentSlope),numerical=unitNormal(cross,tangent);
-  assert.ok(Math.hypot(...analytical.map((value,index)=>value-numerical[index]))<2e-7,`Surface normal: ${context}`);
+const bodyGeometryFixture=()=>{
+ const width=96,height=144,count=width*height,alpha=new Uint8Array(count),plain=new Uint8Array(count).fill(2),stitched=plain.slice(),paints=[2,4,5,6];
+ for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+  const index=y*width+x;
+  // Garment-only domain with real outer edges and an alpha hole. The many
+  // pigment stitches have no corresponding physical seam or change in shape.
+  if(y>=50&&y<height-3&&x>=3&&x<width-3&&!(x>=43&&x<=46&&y>=94&&y<=108))alpha[index]=255;
+  stitched[index]=paints[(Math.floor(x/7)+Math.floor(y/11))%paints.length];
  }
- const root=sampleTaperedLock(rise,rootRadius,rootRadius,-.3,rootRadius*.6,.1);
- let previousHeight=root.height;
- for(const widthRatio of [.1,.01,.001]){
-  const radius=rootRadius*widthRatio,tip=sampleTaperedLock(rise,rootRadius,radius,-.3,radius*.6,.1);
-  assert.ok(tip.height<previousHeight,'A narrowing lock loses height instead of keeping a steep constant-height ridge');
-  assert.ok(Math.abs(tip.height/root.height-widthRatio)<1e-12,'Tip height follows its shrinking width');
-  assert.ok(Math.abs(tip.crossSlope-root.crossSlope)<1e-12,'The cross slope stays bounded as the tip narrows');
-  assert.ok(Math.abs(tip.tangentSlope-root.tangentSlope)<1e-12,'The taper slope stays bounded as the tip narrows');
-  previousHeight=tip.height;
+ return {width,height,alpha,plain,stitched};
+};
+
+test('repainting a stitched garment does not change its actual depth normals or form treatment',()=>{
+ const {width,height,alpha,plain,stitched}=bodyGeometryFixture(),onePaint=buildPortraitGeometry(plain,alpha,width,height),manyPaints=buildPortraitGeometry(stitched,alpha,width,height);
+ assert.deepEqual(manyPaints.surfaces,onePaint.surfaces,'All four costume pigments remain the same physical garment');
+ assert.deepEqual(manyPaints.depth,onePaint.depth,'Pigment boundaries cannot raise terraces or change occlusion geometry');
+ assert.deepEqual(manyPaints.normals,onePaint.normals,'Changing paint cannot create artificial light-facing planes');
+ assert.deepEqual(manyPaints.formBlend,onePaint.formBlend,'The same fabric keeps its shading treatment across color blocks');
+});
+
+test('built garment normals are perpendicular to the actual final depth tangents including alpha edges',()=>{
+ const {width,height,alpha,stitched}=bodyGeometryFixture(),geometry=buildPortraitGeometry(stitched,alpha,width,height);let checked=0,edgeChecks=0;
+ for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+  const index=y*width+x;if(!alpha[index])continue;
+  const compatible=(other:number)=>other>=0&&other<alpha.length&&alpha[other]>0&&geometry.surfaces[other]===2;
+  const horizontal=[x>0&&compatible(index-1)?index-1:index,x+1<width&&compatible(index+1)?index+1:index],vertical=[y>0&&compatible(index-width)?index-width:index,y+1<height&&compatible(index+width)?index+width:index];
+  const dx=horizontal[0]===horizontal[1]?0:(geometry.depth[horizontal[1]]-geometry.depth[horizontal[0]])/(horizontal[0]===index||horizontal[1]===index?1:2),dy=vertical[0]===vertical[1]?0:(geometry.depth[vertical[1]]-geometry.depth[vertical[0]])/(vertical[0]===index||vertical[1]===index?1:2);
+  const [nx,ny,nz]=geometry.normals.subarray(index*3,index*3+3);
+  assert.ok(Number.isFinite(geometry.depth[index])&&nz>0);assert.ok(Math.abs(Math.hypot(nx,ny,nz)-1)<1e-6);
+  assert.ok(Math.abs(nx+nz*dx)<1e-6,`The x tangent lies in the illuminated surface at ${x},${y}`);assert.ok(Math.abs(ny+nz*dy)<1e-6,`The y tangent lies in the illuminated surface at ${x},${y}`);
+  checked++;if(horizontal.includes(index)||vertical.includes(index))edgeChecks++;
  }
+ assert.ok(checked>7000&&edgeChecks>300,'Coverage includes the entire generated garment and its silhouette/hole boundaries');
+});
+
+test('actual curved hair masks remain finite and normalized as strands narrow to one-pixel tips',()=>{
+ const width=96,height=144,materials=new Uint8Array(width*height).fill(1),alpha=new Uint8Array(width*height);let opaque=0;
+ for(let y=5;y<height-3;y++){
+  const t=(y-5)/(height-8),center=Math.round(width*(.45+.28*Math.sin(t*Math.PI*.75))),radius=Math.max(0,Math.round(7*(1-t)));
+  for(let x=Math.max(0,center-radius);x<=Math.min(width-1,center+radius);x++){alpha[y*width+x]=255;opaque++;}
+ }
+ const geometry=buildPortraitGeometry(materials,alpha,width,height);let tips=0;
+ for(let index=0;index<alpha.length;index++)if(alpha[index]){
+  const normal=geometry.normals.subarray(index*3,index*3+3);assert.ok(Number.isFinite(geometry.depth[index]));assert.ok(Array.from(normal).every(Number.isFinite));assert.ok(normal[2]>0&&Math.abs(Math.hypot(...normal)-1)<1e-6);
+  if(Math.floor(index/width)>height-12)tips++;
+ }
+ assert.ok(opaque>900&&tips>5,'The built fixture includes curved broad locks and one-pixel tip coverage');
 });
 
 test('cast shadows follow raised geometry toward the source and disappear when the key is off',()=>{
